@@ -8,6 +8,7 @@ Returns its findings along with per-model token consumption.
 import asyncio
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 
@@ -130,8 +131,11 @@ education, in the military, or still looking for work.
    First search just the person's full name. If that doesn't return relevant
    results, refine by adding the school name, city, or department to the
    query — the same escalation strategy as with LinkedIn.
-6. Return your final answer as ONLY a JSON object (no markdown fences, no
-   extra text) with these fields:
+6. After completing your research, you MUST output a JSON object as your
+   final message. This is mandatory — do not just describe what the JSON
+   would look like, you must actually write it out. Output ONLY the raw
+   JSON object with no markdown fences, no extra text, no explanation
+   before or after. The JSON must contain these fields:
    - has_job: boolean (true if currently employed)
    - job_type: one of "RelatedJob", "StillLooking", "MilitaryService", "ContinuingEducation", "UnrelatedJob", "Other"
    - job_related: boolean (true if the current job appears related to their field of study)
@@ -145,6 +149,8 @@ education, in the military, or still looking for work.
    - education_field: string (what they are studying, empty string if N/A)
    - sources: list of URLs where this information was sourced from (only sources related to the person, empty if no sources found)
 
+IMPORTANT: Your final response must be ONLY the JSON object. Do not wrap it
+in markdown code fences. Do not add any text before or after the JSON.
 Be efficient — do not repeat searches unnecessarily.
 If no information is found anywhere, return the JSON with empty strings for all fields.
 
@@ -183,8 +189,7 @@ best fits the person's CURRENT primary activity:
   as a retail cashier.
 - **StillLooking**: The person does not appear to be currently employed. Their
   profile says "seeking opportunities", "open to work", or shows no current
-  position after graduation. Also use this when no information can be found
-  about the person at all.
+  position after graduation.
 - **MilitaryService**: The person is currently serving in any branch of the
   U.S. military (Army, Navy, Air Force, Marines, Coast Guard, Space Force,
   National Guard, or Reserves).
@@ -349,6 +354,7 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
 
     tool_call_count = 0
     final_text = ""
+    all_thinking_text: list[str] = []  # collect thinking for fallback parsing
 
     # Agent-level token usage (orchestration LLM calls)
     agent_input_tokens = 0
@@ -379,6 +385,7 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
                     logger.debug("RESULT {} -> {}", fr.name, resp_text)
                 if getattr(part, "thought", False) and getattr(part, "text", None):
                     logger.debug("THINKING: {}", part.text)
+                    all_thinking_text.append(part.text)
                 elif getattr(part, "text", None) and not event.is_final_response():
                     logger.debug("REASONING: {}", part.text)
 
@@ -390,7 +397,18 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
             agent_thinking_tokens += getattr(um, "thoughts_token_count", 0) or 0
 
         if event.is_final_response():
-            final_text = event.content.parts[0].text
+            # Collect non-thought text from the final response parts
+            non_thought_parts = []
+            thought_parts = []
+            for part in event.content.parts:
+                text = getattr(part, "text", None)
+                if text:
+                    if getattr(part, "thought", False):
+                        thought_parts.append(text)
+                    else:
+                        non_thought_parts.append(text)
+            # Prefer actual output text; fall back to thought text
+            final_text = "\n".join(non_thought_parts) if non_thought_parts else "\n".join(thought_parts)
 
     # ── build consumption report ───────────────────────────
     # Per-model aggregation
@@ -422,9 +440,31 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     )
 
     person_profile = None
-    if final_text:
+    # Try to parse JSON from the agent response.  The model sometimes emits
+    # the JSON only inside its thinking and returns narrative text as the
+    # "final" response.  We try multiple sources in order of preference.
+    parse_candidates = [final_text] + list(reversed(all_thinking_text))
+    data = None
+    for candidate in parse_candidates:
+        if not candidate:
+            continue
         try:
-            data = _extract_json(final_text)
+            data = _extract_json(candidate)
+            if isinstance(data, dict) and "job_type" in data:
+                break  # found a valid profile JSON
+            data = None
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            # Also try to find a JSON object embedded in narrative text
+            m = re.search(r'\{[^{}]*"job_type"\s*:.*?\}', candidate, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group())
+                    break
+                except json.JSONDecodeError:
+                    data = None
+
+    if data and isinstance(data, dict):
+        try:
             person_profile = PersonProfile(
                 has_job=bool(data.get("has_job", False)),
                 job_type=data.get("job_type", "Other"),
@@ -439,8 +479,10 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
                 education_field=data.get("education_field", ""),
                 sources=data.get("sources", []) or list(_profile_sources),
             )
-        except (json.JSONDecodeError, AttributeError):
-            logger.warning("Could not parse structured profile from agent response")
+        except Exception:
+            logger.warning("Could not build profile from parsed data")
+    else:
+        logger.warning("Could not parse structured profile from agent response")
 
     return AgentResult(
         profile=person_profile,
