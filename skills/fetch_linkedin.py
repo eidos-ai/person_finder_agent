@@ -2,9 +2,14 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote
+
+# Add parent directory to path for token_usage import
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from google import genai
 from selenium import webdriver
@@ -14,8 +19,8 @@ from loguru import logger
 from token_usage import TokenUsage, extract_token_usage
 
 CHROMIUM_BIN = "/Applications/Chromium.app/Contents/MacOS/Chromium"
-MASTER_PROFILE_DIR = "/Users/marceloortega/.chromium-profiles/linkedin"
-GCP_SA_PATH = "/Users/marceloortega/eidos/jarlath_scrap/gcp-sa Manuel_Correa JS.json"
+MASTER_PROFILE_DIR = "/Users/cristiangonzalez/.chromium-profiles/linkedin"
+GCP_SA_PATH = "/Users/cristiangonzalez/Desktop/git/js_person_finder/gcp-sa Manuel_Correa JS.json"
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_SA_PATH
 
@@ -209,7 +214,16 @@ def search_profiles(keywords: str) -> tuple[list[LinkedInProfile], TokenUsage]:
     html = fetch_linkedin_html(url)
 
     if "No results found" in html or "no-results" in html:
-        raise NoSearchResultsError(f"No results for: {keywords}")
+        logger.info(f"No LinkedIn search results found for: {keywords}")
+        # Return empty list instead of raising exception - caller handles empty results gracefully
+        empty_usage = TokenUsage(
+            model_name="gemini-2.0-flash",
+            input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            cost_usd=0.0,
+        )
+        return [], empty_usage
 
     profile_urls = re.findall(r'href="(https://www\.linkedin\.com/in/[^"?]+)', html)
     profile_urls = list(dict.fromkeys(profile_urls))
@@ -261,7 +275,7 @@ Page content:
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] == "login":
+    if len(sys.argv) > 1 and sys.argv[1] in ("login", "--login", "-l"):
         open_chromium_for_login()
     elif len(sys.argv) > 1 and sys.argv[1] == "profile" and len(sys.argv) > 2:
         profile_url = sys.argv[2]

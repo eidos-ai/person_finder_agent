@@ -1,9 +1,14 @@
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote
+
+# Add parent directory to path for token_usage import
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from google import genai
 from selenium import webdriver
@@ -13,7 +18,7 @@ from loguru import logger
 from token_usage import TokenUsage, extract_token_usage
 
 CHROMIUM_BIN = "/Applications/Chromium.app/Contents/MacOS/Chromium"
-GCP_SA_PATH = "/Users/marceloortega/eidos/jarlath_scrap/gcp-sa Manuel_Correa JS.json"
+GCP_SA_PATH = "/Users/cristiangonzalez/Desktop/git/js_person_finder/gcp-sa Manuel_Correa JS.json"
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_SA_PATH
 
