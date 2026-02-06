@@ -6,6 +6,7 @@ Returns its findings along with per-model token consumption.
 """
 
 import asyncio
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from skills.fetch_linkedin import (
     search_profiles as _search_profiles,
     get_full_linkedin_profile as _get_full_linkedin_profile,
     FullLinkedinProfile,
+    _extract_json,
 )
 from skills.fetch_google import (
     EmptyLLMResponseError as _GoogleEmptyError,
@@ -115,16 +117,26 @@ Steps:
 1. Use search_linkedin_profiles with the person's full name to find matching profiles.
 2. Review the results and pick the best match using all available context
    (location, school, department, graduation date) to disambiguate.
-3. Use get_linkedin_job_info with the profile URL to get their employment details.
+3. Use get_linkedin_job_info with the profile URL to get their profile markdown.
 4. If needed, use fetch_web_page to fill in missing information
    (e.g. if missing info for employee).
-5. Return a clear summary with: name, headline, location, profile URL,
-   and full employment information.
+5. Return your final answer as ONLY a JSON object (no markdown fences, no extra text) with these fields:
+   - has_job: boolean (true if currently employed)
+   - job_type: one of "RelatedJob", "StillLooking", "MilitaryService", "ContinuingEducation", "UnrelatedJob", "Other"
+   - job_related: boolean (true if the current job appears related to their field of study)
+   - job_schedule: one of "FullTime", "PartTime", "Unknown"
+   - self_employed: boolean (true if freelancing or running their own business)
+   - employer_name: string (empty string if not employed)
+   - employer_city: string (empty string if unknown)
+   - employer_state: string (empty string if unknown)
+   - continuing_education: boolean (true if currently enrolled in education)
+   - education_institution: string (empty string if not in continuing education)
+   - education_field: string (what they are studying, empty string if N/A)
 
 Be efficient — do not repeat searches unnecessarily.
 If the first search returns no good match, try adding the school name or city
 to the search keywords.
-If no profiles are found, say so clearly.
+If no profiles are found, return the JSON with has_job=false, job_type="Other", and empty strings for all other fields.
 """
 
 # Accumulator for token usage from LLM calls *inside* tools
@@ -177,19 +189,7 @@ def get_linkedin_job_info(profile_url: str) -> str:
     _last_profile = info
     _profile_sources.append(profile_url)
 
-    return (
-        f"has_job: {info.has_job}\n"
-        f"job_type: {info.job_type}\n"
-        f"job_related: {info.job_related}\n"
-        f"job_schedule: {info.job_schedule}\n"
-        f"self_employed: {info.self_employed}\n"
-        f"employer_name: {info.employer_name}\n"
-        f"employer_city: {info.employer_city}\n"
-        f"employer_state: {info.employer_state}\n"
-        f"continuing_education: {info.continuing_education}\n"
-        f"education_institution: {info.education_institution}\n"
-        f"education_field: {info.education_field}"
-    )
+    return info.markdown
 
 
 def google_search(query: str) -> str:
@@ -363,22 +363,25 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     )
 
     person_profile = None
-    if _last_profile is not None:
-        p = _last_profile
-        person_profile = PersonProfile(
-            has_job=p.has_job,
-            job_type=p.job_type,
-            job_related=p.job_related,
-            job_schedule=p.job_schedule,
-            self_employed=p.self_employed,
-            employer_name=p.employer_name,
-            employer_city=p.employer_city,
-            employer_state=p.employer_state,
-            continuing_education=p.continuing_education,
-            education_institution=p.education_institution,
-            education_field=p.education_field,
-            sources=list(_profile_sources),
-        )
+    if final_text:
+        try:
+            data = _extract_json(final_text)
+            person_profile = PersonProfile(
+                has_job=bool(data.get("has_job", False)),
+                job_type=data.get("job_type", "Other"),
+                job_related=bool(data.get("job_related", False)),
+                job_schedule=data.get("job_schedule", "Unknown"),
+                self_employed=bool(data.get("self_employed", False)),
+                employer_name=data.get("employer_name", ""),
+                employer_city=data.get("employer_city", ""),
+                employer_state=data.get("employer_state", ""),
+                continuing_education=bool(data.get("continuing_education", False)),
+                education_institution=data.get("education_institution", ""),
+                education_field=data.get("education_field", ""),
+                sources=list(_profile_sources),
+            )
+        except (json.JSONDecodeError, AttributeError):
+            logger.warning("Could not parse structured profile from agent response")
 
     return AgentResult(
         profile=person_profile,
