@@ -30,6 +30,11 @@ from skills.fetch_linkedin import (
     get_full_linkedin_profile as _get_full_linkedin_profile,
     FullLinkedinProfile,
 )
+from skills.fetch_google import (
+    EmptyLLMResponseError as _GoogleEmptyError,
+    fetch_page_content as _fetch_page_content,
+    google_search as _google_search,
+)
 from token_usage import (
     TokenUsage,
     compute_cost_usd,
@@ -92,6 +97,35 @@ APP_NAME = "linkedin_profile_agent"
 USER_ID = "user1"
 SESSION_ID = "session1"
 MAX_LLM_CALLS = 20
+AGENT_MODEL = "gemini-2.5-pro"
+
+AGENT_INSTRUCTION = """\
+You are a LinkedIn profile research agent.
+
+You will receive a person description with: first name, last name, city, state,
+school name, school department, and graduation date.
+
+Your goal is to find their LinkedIn profile and current employment information.
+
+You also have access to fetch_web_page to open any URL and read its content.
+Use it to complement LinkedIn information — for example, to verify an employer,
+look up a company website, or find additional details about the person.
+
+Steps:
+1. Use search_linkedin_profiles with the person's full name to find matching profiles.
+2. Review the results and pick the best match using all available context
+   (location, school, department, graduation date) to disambiguate.
+3. Use get_linkedin_job_info with the profile URL to get their employment details.
+4. If needed, use fetch_web_page to fill in missing information
+   (e.g. if missing info for employee).
+5. Return a clear summary with: name, headline, location, profile URL,
+   and full employment information.
+
+Be efficient — do not repeat searches unnecessarily.
+If the first search returns no good match, try adding the school name or city
+to the search keywords.
+If no profiles are found, say so clearly.
+"""
 
 # Accumulator for token usage from LLM calls *inside* tools
 _tool_token_usages: list[TokenUsage] = []
@@ -158,37 +192,61 @@ def get_linkedin_job_info(profile_url: str) -> str:
     )
 
 
+def google_search(query: str) -> str:
+    """
+    Search Google for the given query and return a list of results with URLs, titles, and descriptions.
+    Use this to find web pages about a person, company, or topic.
+
+    Args:
+        query: Search terms, e.g. "Acme Corp Denver Colorado".
+
+    Returns:
+        Formatted search results, one per line.
+    """
+    try:
+        results, usage = _google_search(query)
+    except _GoogleEmptyError as exc:
+        return f"Google search failed: {exc}"
+    _tool_token_usages.append(usage)
+
+    if not results:
+        return "No search results found."
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.title} | {r.page_url}\n   {r.description}")
+    return "\n".join(lines)
+
+
+def fetch_web_page(url: str) -> str:
+    """
+    Open a web page URL with a headless browser and return its text content.
+    Use this to visit any URL (company websites, news articles, etc.) and read its content.
+
+    Args:
+        url: The full URL to fetch (e.g. https://example.com/about).
+
+    Returns:
+        The text content of the page.
+    """
+    content = _fetch_page_content(url)
+    _profile_sources.append(url)
+    return content
+
+
 # ── ADK agent definition ──────────────────────────────────
 
 search_tool = FunctionTool(search_linkedin_profiles)
 job_info_tool = FunctionTool(get_linkedin_job_info)
+google_search_tool = FunctionTool(google_search)
+web_page_tool = FunctionTool(fetch_web_page)
 
 root_agent = Agent(
     name="linkedin_profile_agent",
-    model="gemini-2.5-pro",
+    model=AGENT_MODEL,
     description="Agent that researches a person's LinkedIn profile and employment status.",
-    instruction="""\
-You are a LinkedIn profile research agent.
-
-You will receive a person description with: first name, last name, city, state,
-school name, school department, and graduation date.
-
-Your goal is to find their LinkedIn profile and current employment information.
-
-Steps:
-1. Use search_linkedin_profiles with the person's full name to find matching profiles.
-2. Review the results and pick the best match using all available context
-   (location, school, department, graduation date) to disambiguate.
-3. Use get_linkedin_job_info with the profile URL to get their employment details.
-4. Return a clear summary with: name, headline, location, profile URL,
-   and full employment information.
-
-Be efficient — do not repeat searches unnecessarily.
-If the first search returns no good match, try adding the school name or city
-to the search keywords.
-If no profiles are found, say so clearly.
-""",
-    tools=[search_tool, job_info_tool],
+    instruction=AGENT_INSTRUCTION,
+    tools=[search_tool, job_info_tool, web_page_tool],
     generate_content_config=GenerateContentConfig(
         thinking_config=ThinkingConfig(include_thoughts=True),
     ),
@@ -280,9 +338,8 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     models: dict[str, ModelUsage] = {}
 
     # Agent orchestration usage
-    agent_model = "gemini-2.5-pro"
-    agent_cost = compute_cost_usd(agent_input_tokens, agent_output_tokens, agent_model, agent_thinking_tokens)
-    models[agent_model] = ModelUsage(
+    agent_cost = compute_cost_usd(agent_input_tokens, agent_output_tokens, AGENT_MODEL, agent_thinking_tokens)
+    models[AGENT_MODEL] = ModelUsage(
         input_tokens=agent_input_tokens,
         output_tokens=agent_output_tokens,
         thinking_tokens=agent_thinking_tokens,
