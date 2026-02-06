@@ -23,6 +23,7 @@ from google.adk.agents import Agent
 from google.adk.runners import Runner, RunConfig
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import FunctionTool
+from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.genai import types
 from google.genai.types import GenerateContentConfig, ThinkingConfig
 
@@ -238,15 +239,16 @@ def fetch_web_page(url: str) -> str:
 
 search_tool = FunctionTool(search_linkedin_profiles)
 job_info_tool = FunctionTool(get_linkedin_job_info)
-google_search_tool = FunctionTool(google_search)
-web_page_tool = FunctionTool(fetch_web_page)
+google_search_tool = GoogleSearchTool(bypass_multi_tools_limit=True)
+# google_search_tool = FunctionTool(google_search)
+# web_page_tool = FunctionTool(fetch_web_page)
 
 root_agent = Agent(
     name="linkedin_profile_agent",
     model=AGENT_MODEL,
     description="Agent that researches a person's LinkedIn profile and employment status.",
     instruction=AGENT_INSTRUCTION,
-    tools=[search_tool, job_info_tool, web_page_tool],
+    tools=[search_tool, job_info_tool, google_search_tool],
     generate_content_config=GenerateContentConfig(
         thinking_config=ThinkingConfig(include_thoughts=True),
     ),
