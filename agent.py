@@ -6,6 +6,7 @@ Returns its findings along with per-model token consumption.
 """
 
 import asyncio
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -30,6 +31,12 @@ from skills.fetch_linkedin import (
     search_profiles as _search_profiles,
     get_full_linkedin_profile as _get_full_linkedin_profile,
     FullLinkedinProfile,
+    _extract_json,
+)
+from skills.fetch_google import (
+    EmptyLLMResponseError as _GoogleEmptyError,
+    fetch_page_content as _fetch_page_content,
+    google_search as _google_search,
 )
 from token_usage import (
     TokenUsage,
@@ -93,6 +100,45 @@ APP_NAME = "linkedin_profile_agent"
 USER_ID = "user1"
 SESSION_ID = "session1"
 MAX_LLM_CALLS = 20
+AGENT_MODEL = "gemini-2.5-pro"
+
+AGENT_INSTRUCTION = """\
+You are a LinkedIn profile research agent.
+
+You will receive a person description with: first name, last name, city, state,
+school name, school department, and graduation date.
+
+Your goal is to find their LinkedIn profile and current employment information.
+
+You also have access to fetch_web_page to open any URL and read its content.
+Use it to complement LinkedIn information — for example, to verify an employer,
+look up a company website, or find additional details about the person.
+
+Steps:
+1. Use search_linkedin_profiles with the person's full name to find matching profiles.
+2. Review the results and pick the best match using all available context
+   (location, school, department, graduation date) to disambiguate.
+3. Use get_linkedin_job_info with the profile URL to get their profile markdown.
+4. If needed, use fetch_web_page to fill in missing information
+   (e.g. if missing info for employee).
+5. Return your final answer as ONLY a JSON object (no markdown fences, no extra text) with these fields:
+   - has_job: boolean (true if currently employed)
+   - job_type: one of "RelatedJob", "StillLooking", "MilitaryService", "ContinuingEducation", "UnrelatedJob", "Other"
+   - job_related: boolean (true if the current job appears related to their field of study)
+   - job_schedule: one of "FullTime", "PartTime", "Unknown"
+   - self_employed: boolean (true if freelancing or running their own business)
+   - employer_name: string (empty string if not employed)
+   - employer_city: string (empty string if unknown)
+   - employer_state: string (empty string if unknown)
+   - continuing_education: boolean (true if currently enrolled in education)
+   - education_institution: string (empty string if not in continuing education)
+   - education_field: string (what they are studying, empty string if N/A)
+
+Be efficient — do not repeat searches unnecessarily.
+If the first search returns no good match, try adding the school name or city
+to the search keywords.
+If no profiles are found, return the JSON with has_job=false, job_type="Other", and empty strings for all other fields.
+"""
 
 # Accumulator for token usage from LLM calls *inside* tools
 _tool_token_usages: list[TokenUsage] = []
@@ -144,31 +190,67 @@ def get_linkedin_job_info(profile_url: str) -> str:
     _last_profile = info
     _profile_sources.append(profile_url)
 
-    return (
-        f"has_job: {info.has_job}\n"
-        f"job_type: {info.job_type}\n"
-        f"job_related: {info.job_related}\n"
-        f"job_schedule: {info.job_schedule}\n"
-        f"self_employed: {info.self_employed}\n"
-        f"employer_name: {info.employer_name}\n"
-        f"employer_city: {info.employer_city}\n"
-        f"employer_state: {info.employer_state}\n"
-        f"continuing_education: {info.continuing_education}\n"
-        f"education_institution: {info.education_institution}\n"
-        f"education_field: {info.education_field}"
-    )
+    return info.markdown
+
+
+def google_search(query: str) -> str:
+    """
+    Search Google for the given query and return a list of results with URLs, titles, and descriptions.
+    Use this to find web pages about a person, company, or topic.
+
+    Args:
+        query: Search terms, e.g. "Acme Corp Denver Colorado".
+
+    Returns:
+        Formatted search results, one per line.
+    """
+    try:
+        results, usage = _google_search(query)
+    except _GoogleEmptyError as exc:
+        return f"Google search failed: {exc}"
+    _tool_token_usages.append(usage)
+
+    if not results:
+        return "No search results found."
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.title} | {r.page_url}\n   {r.description}")
+    return "\n".join(lines)
+
+
+def fetch_web_page(url: str) -> str:
+    """
+    Open a web page URL with a headless browser and return its text content.
+    Use this to visit any URL (company websites, news articles, etc.) and read its content.
+
+    Args:
+        url: The full URL to fetch (e.g. https://example.com/about).
+
+    Returns:
+        The text content of the page.
+    """
+    content = _fetch_page_content(url)
+    _profile_sources.append(url)
+    return content
 
 
 # ── ADK agent definition ──────────────────────────────────
 
 linkedin_search_tool = FunctionTool(search_linkedin_profiles)
 job_info_tool = FunctionTool(get_linkedin_job_info)
+<<<<<<< HEAD
 google_search_tool = GoogleSearchTool(bypass_multi_tools_limit=True)
+=======
+google_search_tool = FunctionTool(google_search)
+web_page_tool = FunctionTool(fetch_web_page)
+>>>>>>> a2a9bc5997ad943da86e30a6742e124301c0721b
 
 root_agent = Agent(
     name="linkedin_profile_agent",
-    model="gemini-2.5-pro",
+    model=AGENT_MODEL,
     description="Agent that researches a person's LinkedIn profile and employment status.",
+<<<<<<< HEAD
     instruction="""\
 You are a person research agent with access to LinkedIn tools and Google Search.
 
@@ -195,6 +277,10 @@ or city to the search keywords before falling back to Google Search.
 If no information is found anywhere, say so clearly.
 """,
     tools=[linkedin_search_tool, job_info_tool, google_search_tool],
+=======
+    instruction=AGENT_INSTRUCTION,
+    tools=[search_tool, job_info_tool, web_page_tool],
+>>>>>>> a2a9bc5997ad943da86e30a6742e124301c0721b
     generate_content_config=GenerateContentConfig(
         thinking_config=ThinkingConfig(include_thoughts=True),
     ),
@@ -286,9 +372,8 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     models: dict[str, ModelUsage] = {}
 
     # Agent orchestration usage
-    agent_model = "gemini-2.5-pro"
-    agent_cost = compute_cost_usd(agent_input_tokens, agent_output_tokens, agent_model, agent_thinking_tokens)
-    models[agent_model] = ModelUsage(
+    agent_cost = compute_cost_usd(agent_input_tokens, agent_output_tokens, AGENT_MODEL, agent_thinking_tokens)
+    models[AGENT_MODEL] = ModelUsage(
         input_tokens=agent_input_tokens,
         output_tokens=agent_output_tokens,
         thinking_tokens=agent_thinking_tokens,
@@ -312,22 +397,25 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     )
 
     person_profile = None
-    if _last_profile is not None:
-        p = _last_profile
-        person_profile = PersonProfile(
-            has_job=p.has_job,
-            job_type=p.job_type,
-            job_related=p.job_related,
-            job_schedule=p.job_schedule,
-            self_employed=p.self_employed,
-            employer_name=p.employer_name,
-            employer_city=p.employer_city,
-            employer_state=p.employer_state,
-            continuing_education=p.continuing_education,
-            education_institution=p.education_institution,
-            education_field=p.education_field,
-            sources=list(_profile_sources),
-        )
+    if final_text:
+        try:
+            data = _extract_json(final_text)
+            person_profile = PersonProfile(
+                has_job=bool(data.get("has_job", False)),
+                job_type=data.get("job_type", "Other"),
+                job_related=bool(data.get("job_related", False)),
+                job_schedule=data.get("job_schedule", "Unknown"),
+                self_employed=bool(data.get("self_employed", False)),
+                employer_name=data.get("employer_name", ""),
+                employer_city=data.get("employer_city", ""),
+                employer_state=data.get("employer_state", ""),
+                continuing_education=bool(data.get("continuing_education", False)),
+                education_institution=data.get("education_institution", ""),
+                education_field=data.get("education_field", ""),
+                sources=list(_profile_sources),
+            )
+        except (json.JSONDecodeError, AttributeError):
+            logger.warning("Could not parse structured profile from agent response")
 
     return AgentResult(
         profile=person_profile,

@@ -89,6 +89,41 @@ def _strip_html(html: str) -> str:
     return text.strip()
 
 
+def fetch_page_content(url: str, wait: int = 5) -> str:
+    """Open a URL with headless Chromium and return its text content.
+
+    Extracts <main> if available, otherwise falls back to <body>.
+
+    Args:
+        url: The page URL to fetch.
+        wait: Seconds to wait for page load.
+
+    Returns:
+        The stripped text content of the page.
+    """
+    opts = _base_options(headless=True)
+    driver = webdriver.Chrome(options=opts)
+    try:
+        driver.get(url)
+        time.sleep(wait)
+
+        html = driver.page_source
+        if not html or len(html.strip()) < 100:
+            raise PageLoadError(f"Empty page for: {url}")
+
+        for selector in ("main", "body"):
+            try:
+                el = driver.find_element("css selector", selector)
+                html = el.get_attribute("outerHTML")
+                break
+            except Exception:
+                continue
+
+        return _strip_html(html)
+    finally:
+        driver.quit()
+
+
 def google_search(query: str, wait: int = 5) -> tuple[list[SearchResult], TokenUsage]:
     """Search Google and return structured results parsed by LLM.
 
@@ -130,7 +165,10 @@ Page content:
     raw = re.sub(r"^```json\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
 
-    items = json.loads(raw)
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        raise EmptyLLMResponseError(f"LLM did not return valid JSON (possibly a CAPTCHA page): {raw[:200]}")
     if not items:
         raise EmptyLLMResponseError("No search results extracted")
 
