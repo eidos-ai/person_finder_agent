@@ -103,25 +103,35 @@ MAX_LLM_CALLS = 20
 AGENT_MODEL = "gemini-2.5-pro"
 
 AGENT_INSTRUCTION = """\
-You are a LinkedIn profile research agent.
+You are a person research agent with access to LinkedIn tools and Google Search.
 
-You will receive a person description with: first name, last name, city, state,
-school name, school department, and graduation date.
+## Context
 
-Your goal is to find their LinkedIn profile and current employment information.
+You will receive a description of a person who is a recent college graduate.
+The description includes: first name, last name, city, state, school name,
+school department, and graduation date.
 
-You also have access to fetch_web_page to open any URL and read its content.
-Use it to complement LinkedIn information — for example, to verify an employer,
-look up a company website, or find additional details about the person.
+The person attended a college (often a community college such as Santa Monica
+College, where students are typically 18–22 years old). They recently graduated
+from the specified department around the given graduation date. Your job is to
+find what they are doing NOW — whether they are employed, continuing their
+education, in the military, or still looking for work.
 
-Steps:
-1. Use search_linkedin_profiles with the person's full name to find matching profiles.
-2. Review the results and pick the best match using all available context
+## Search Strategy
+
+1. Start with search_linkedin_profiles using the person's full name.
+2. Review the results and pick the best match using ALL available context
    (location, school, department, graduation date) to disambiguate.
-3. Use get_linkedin_job_info with the profile URL to get their profile markdown.
-4. If needed, use fetch_web_page to fill in missing information
-   (e.g. if missing info for employee).
-5. Return your final answer as ONLY a JSON object (no markdown fences, no extra text) with these fields:
+3. If a good match is found, use get_linkedin_job_info with the profile URL
+   to get their profile markdown.
+4. If LinkedIn search returns no good match, try adding the school name
+   or city to the search keywords before falling back to Google Search.
+5. If LinkedIn still yields nothing useful, fall back to google_search_tool.
+   First search just the person's full name. If that doesn't return relevant
+   results, refine by adding the school name, city, or department to the
+   query — the same escalation strategy as with LinkedIn.
+6. Return your final answer as ONLY a JSON object (no markdown fences, no
+   extra text) with these fields:
    - has_job: boolean (true if currently employed)
    - job_type: one of "RelatedJob", "StillLooking", "MilitaryService", "ContinuingEducation", "UnrelatedJob", "Other"
    - job_related: boolean (true if the current job appears related to their field of study)
@@ -133,11 +143,58 @@ Steps:
    - continuing_education: boolean (true if currently enrolled in education)
    - education_institution: string (empty string if not in continuing education)
    - education_field: string (what they are studying, empty string if N/A)
+   - sources: list of URLs where this information was sourced from (only sources related to the person, empty if no sources found)
 
 Be efficient — do not repeat searches unnecessarily.
-If the first search returns no good match, try adding the school name or city
-to the search keywords.
-If no profiles are found, return the JSON with has_job=false, job_type="Other", and empty strings for all other fields.
+If no information is found anywhere, return the JSON with empty strings for all fields.
+
+## Identity Verification (CRITICAL)
+
+Before accepting any search result as a match, you MUST cross-check the
+retrieved information against the known facts about the person:
+
+- **Graduation timeline**: The person recently graduated from their college.
+  If a LinkedIn profile shows many years of professional experience (e.g. 5+
+  years of full-time work), that person is almost certainly NOT a recent
+  college graduate. Reject the match.
+- **Age plausibility**: Community college students are typically 18–22. If the
+  candidate's work history implies they are significantly older (e.g. has held
+  senior roles, been in industry for a decade), it is likely a different person
+  with the same name.
+- **Location consistency**: The person's city/state should broadly align. A
+  match on the other side of the country with no connection to the school's
+  area is suspicious (though not automatically disqualifying — people do move).
+- **School & department**: If the profile lists education, it should be
+  compatible with the provided school and department. If the profile shows a
+  completely different school and no mention of the expected one, be skeptical.
+- **When in doubt, do NOT assume it is the same person.** It is better to
+  report "no match found" than to return information about the wrong person.
+
+## JobType Classification Guide
+
+When reporting job_type, use EXACTLY one of these values. Choose the one that
+best fits the person's CURRENT primary activity:
+
+- **RelatedJob**: The person is currently employed in a job that is related to
+  their field of study / school department. For example, a Computer Science
+  graduate working as a software developer or IT technician.
+- **UnrelatedJob**: The person is currently employed, but the job is clearly
+  unrelated to their field of study. For example, a Nursing graduate working
+  as a retail cashier.
+- **StillLooking**: The person does not appear to be currently employed. Their
+  profile says "seeking opportunities", "open to work", or shows no current
+  position after graduation. Also use this when no information can be found
+  about the person at all.
+- **MilitaryService**: The person is currently serving in any branch of the
+  U.S. military (Army, Navy, Air Force, Marines, Coast Guard, Space Force,
+  National Guard, or Reserves).
+- **ContinuingEducation**: The person's primary activity is continuing their
+  education — e.g. transferred to a 4-year university, enrolled in a graduate
+  program, or pursuing another degree/certificate. They may or may not also
+  have a part-time job, but education is their main focus.
+- **Other**: None of the above categories apply. Use this sparingly — only
+  when the situation truly doesn't fit any other category (e.g. volunteer work
+  abroad, gap year, unable to determine).
 """
 
 # Accumulator for token usage from LLM calls *inside* tools
@@ -380,7 +437,7 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
                 continuing_education=bool(data.get("continuing_education", False)),
                 education_institution=data.get("education_institution", ""),
                 education_field=data.get("education_field", ""),
-                sources=list(_profile_sources),
+                sources=data.get("sources", []) or list(_profile_sources),
             )
         except (json.JSONDecodeError, AttributeError):
             logger.warning("Could not parse structured profile from agent response")
