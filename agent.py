@@ -23,7 +23,6 @@ from google.adk.agents import Agent
 from google.adk.runners import Runner, RunConfig
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import FunctionTool
-from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.genai import types
 from google.genai.types import GenerateContentConfig, ThinkingConfig
 
@@ -237,50 +236,17 @@ def fetch_web_page(url: str) -> str:
 
 # ── ADK agent definition ──────────────────────────────────
 
-linkedin_search_tool = FunctionTool(search_linkedin_profiles)
+search_tool = FunctionTool(search_linkedin_profiles)
 job_info_tool = FunctionTool(get_linkedin_job_info)
-<<<<<<< HEAD
-google_search_tool = GoogleSearchTool(bypass_multi_tools_limit=True)
-=======
 google_search_tool = FunctionTool(google_search)
 web_page_tool = FunctionTool(fetch_web_page)
->>>>>>> a2a9bc5997ad943da86e30a6742e124301c0721b
 
 root_agent = Agent(
     name="linkedin_profile_agent",
     model=AGENT_MODEL,
     description="Agent that researches a person's LinkedIn profile and employment status.",
-<<<<<<< HEAD
-    instruction="""\
-You are a person research agent with access to LinkedIn tools and Google Search.
-
-You will receive a person description with: first name, last name, city, state,
-school name, school department, and graduation date.
-
-Your goal is to find their current employment and education information.
-
-Strategy:
-1. Start with search_linkedin_profiles using the person's full name.
-2. Review the results and pick the best match using all available context
-   (location, school, department, graduation date) to disambiguate.
-3. If a good match is found, use get_linkedin_job_info with the profile URL
-   to get their employment details.
-4. If LinkedIn search returns no good match, use Google Search to find
-   the person's employment or education info from other public sources
-   (e.g. company websites, news articles, university pages).
-5. Return a clear summary with: name, headline, location, profile URL (if found),
-   and full employment information.
-
-Be efficient — do not repeat searches unnecessarily.
-If the first LinkedIn search returns no good match, try adding the school name
-or city to the search keywords before falling back to Google Search.
-If no information is found anywhere, say so clearly.
-""",
-    tools=[linkedin_search_tool, job_info_tool, google_search_tool],
-=======
     instruction=AGENT_INSTRUCTION,
     tools=[search_tool, job_info_tool, web_page_tool],
->>>>>>> a2a9bc5997ad943da86e30a6742e124301c0721b
     generate_content_config=GenerateContentConfig(
         thinking_config=ThinkingConfig(include_thoughts=True),
     ),
