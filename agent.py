@@ -11,6 +11,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from enum import Enum
 
 from loguru import logger
 
@@ -89,8 +90,16 @@ class Consumption:
     models: dict[str, ModelUsage]
 
 
+class Confidence(Enum):
+    LOW = "LOW"
+    MID = "MID"
+    HIGH = "HIGH"
+
+
 @dataclass
 class AgentResult:
+    found: bool
+    confidence: Confidence
     profile: PersonProfile | None
     response: str
     consumption: Consumption
@@ -136,6 +145,8 @@ education, in the military, or still looking for work.
    would look like, you must actually write it out. Output ONLY the raw
    JSON object with no markdown fences, no extra text, no explanation
    before or after. The JSON must contain these fields:
+   - found: boolean (true if you found information about this specific person, false if no match was found or you are unsure)
+   - confidence: one of "HIGH", "MID", "LOW" — how confident you are that you found the RIGHT person (not someone with the same name). HIGH = strong match on name + school + location + timeline. MID = partial match (e.g. name and location match but school not confirmed). LOW = weak match or mostly guessing.
    - has_job: boolean (true if currently employed)
    - job_type: one of "RelatedJob", "StillLooking", "MilitaryService", "ContinuingEducation", "UnrelatedJob", "Other"
    - job_related: boolean (true if the current job appears related to their field of study)
@@ -152,7 +163,7 @@ education, in the military, or still looking for work.
 IMPORTANT: Your final response must be ONLY the JSON object. Do not wrap it
 in markdown code fences. Do not add any text before or after the JSON.
 Be efficient — do not repeat searches unnecessarily.
-If no information is found anywhere, return the JSON with empty strings for all fields.
+If no information is found anywhere, return the JSON with found=false and empty strings for all other fields.
 
 ## Identity Verification (CRITICAL)
 
@@ -173,8 +184,12 @@ retrieved information against the known facts about the person:
 - **School & department**: If the profile lists education, it should be
   compatible with the provided school and department. If the profile shows a
   completely different school and no mention of the expected one, be skeptical.
-- **When in doubt, do NOT assume it is the same person.** It is better to
-  report "no match found" than to return information about the wrong person.
+- **When in doubt, still pick the most likely candidate** rather than
+  reporting "no match found". Return their information but set the
+  confidence field to "MID" or "LOW" to reflect your uncertainty. Only
+  return found=false if you truly found NO plausible candidate at all.
+  It is more useful to return a best-guess result with low confidence
+  than to discard a probable match.
 
 ## JobType Classification Guide
 
@@ -440,6 +455,8 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     )
 
     person_profile = None
+    person_found = False
+    person_confidence = Confidence.LOW
     # Try to parse JSON from the agent response.  The model sometimes emits
     # the JSON only inside its thinking and returns narrative text as the
     # "final" response.  We try multiple sources in order of preference.
@@ -464,6 +481,9 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
                     data = None
 
     if data and isinstance(data, dict):
+        person_found = bool(data.get("found", False))
+        raw_conf = str(data.get("confidence", "LOW")).upper()
+        person_confidence = Confidence(raw_conf) if raw_conf in ("LOW", "MID", "HIGH") else Confidence.LOW
         try:
             person_profile = PersonProfile(
                 has_job=bool(data.get("has_job", False)),
@@ -485,6 +505,8 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
         logger.warning("Could not parse structured profile from agent response")
 
     return AgentResult(
+        found=person_found,
+        confidence=person_confidence,
         profile=person_profile,
         response=final_text,
         consumption=consumption,

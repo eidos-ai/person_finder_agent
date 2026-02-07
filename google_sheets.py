@@ -14,7 +14,7 @@ def load_persons(
     spreadsheet_id: str,
     start: Optional[int] = None,
     end: Optional[int] = None,
-) -> list[PersonInitialDescription]:
+) -> list[tuple[str, PersonInitialDescription]]:
     """
     Load persons from Google Sheets.
 
@@ -24,7 +24,7 @@ def load_persons(
         end: Optional end row index (exclusive)
 
     Returns:
-        List of PersonInitialDescription instances
+        List of (school_id, PersonInitialDescription) tuples.
     """
     sheet = _gs.open_by_key(spreadsheet_id).worksheet("DataImport")
     data = sheet.get_all_values()
@@ -41,7 +41,8 @@ def load_persons(
 
     persons = []
     for _, row in df.iterrows():
-        persons.append(PersonInitialDescription(
+        school_id = row["SchoolID - Internal Use Only"]
+        person = PersonInitialDescription(
             first_name=row["FirstName"],
             last_name=row["LastName"],
             city=row["City"],
@@ -49,5 +50,6 @@ def load_persons(
             school_name=row["SchoolName"],
             school_department=row["Department"],
             graduation_date=row["Graduation"],
-        ))
+        )
+        persons.append((school_id, person))
     return persons
