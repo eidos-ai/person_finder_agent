@@ -3,13 +3,13 @@
 from dataclasses import dataclass
 
 # ---- pricing (USD per 1M tokens) ----
-# (input, output)
+# (input, cached_input, output)
 MODEL_PRICING = {
-    "gemini-2.0-flash": (0.30, 2.50),
-    "gemini-2.5-flash": (0.15, 3.50),
-    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-2.0-flash": (0.30, 0.0375, 2.50),
+    "gemini-2.5-flash": (0.15, 0.01875, 3.50),
+    "gemini-2.5-pro": (1.25, 0.125, 10.00),
 }
-DEFAULT_PRICING = (0.30, 2.50)
+DEFAULT_PRICING = (0.30, 0.0375, 2.50)
 
 
 @dataclass
@@ -18,6 +18,7 @@ class TokenUsage:
     input_tokens: int
     output_tokens: int
     thinking_tokens: int
+    cached_tokens: int
     cost_usd: float
 
 
@@ -30,11 +31,13 @@ def _safe_int(x, default: int = 0) -> int:
 
 def compute_cost_usd(
     input_tokens: int, output_tokens: int, model_name: str = "gemini-2.0-flash",
-    thinking_tokens: int = 0,
+    thinking_tokens: int = 0, cached_tokens: int = 0,
 ) -> float:
-    input_price, output_price = MODEL_PRICING.get(model_name, DEFAULT_PRICING)
+    input_price, cached_price, output_price = MODEL_PRICING.get(model_name, DEFAULT_PRICING)
+    non_cached = max(input_tokens - cached_tokens, 0)
     return (
-        (input_tokens / 1_000_000) * input_price
+        (non_cached / 1_000_000) * input_price
+        + (cached_tokens / 1_000_000) * cached_price
         + ((output_tokens + thinking_tokens) / 1_000_000) * output_price
     )
 
@@ -44,11 +47,13 @@ def extract_token_usage(response, model_name: str) -> TokenUsage:
     input_tokens = 0
     output_tokens = 0
     thinking_tokens = 0
+    cached_tokens = 0
 
     um = getattr(response, "usage_metadata", None) or getattr(response, "usage", None)
     if um is not None:
         input_tokens = _safe_int(getattr(um, "prompt_token_count", None), input_tokens)
         output_tokens = _safe_int(getattr(um, "candidates_token_count", None), output_tokens)
+        cached_tokens = _safe_int(getattr(um, "cached_content_token_count", None), cached_tokens)
 
         input_tokens = _safe_int(getattr(um, "input_tokens", None), input_tokens)
         output_tokens = _safe_int(getattr(um, "output_tokens", None), output_tokens)
@@ -64,12 +69,13 @@ def extract_token_usage(response, model_name: str) -> TokenUsage:
             if total_i >= input_tokens:
                 output_tokens = total_i - input_tokens
 
-    cost_usd = compute_cost_usd(input_tokens, output_tokens, model_name, thinking_tokens)
+    cost_usd = compute_cost_usd(input_tokens, output_tokens, model_name, thinking_tokens, cached_tokens)
 
     return TokenUsage(
         model_name=model_name,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         thinking_tokens=thinking_tokens,
+        cached_tokens=cached_tokens,
         cost_usd=cost_usd,
     )

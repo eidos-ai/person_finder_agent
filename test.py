@@ -41,6 +41,9 @@ async def process_person(person: PersonInitialDescription) -> tuple[float, float
                 usage.thinking_tokens, cost,
             )
         logger.info("Tool calls: {}", c.tool_calls_used)
+        if c.coresignal_calls:
+            for tool_name, count in c.coresignal_calls.items():
+                logger.info("Coresignal | {} = {}", tool_name, count)
 
     except Exception as e:
         logger.exception(e)

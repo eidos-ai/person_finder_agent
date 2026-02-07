@@ -16,7 +16,7 @@ from typing import Optional
 
 from loguru import logger
 
-from agent import PersonInitialDescription, PersonProfile, LinkedInFatalError, run_agent
+from agent import PersonInitialDescription, PersonProfile, run_agent
 from google_sheets import load_persons
 
 
@@ -31,7 +31,7 @@ PROFILE_FIELDS = [
     "confidence",
     "has_job", "job_type", "job_related", "job_schedule",
     "self_employed", "employer_name", "employer_city", "employer_state",
-    "continuing_education", "education_institution", "education_field",
+    "continuing_education", "current_education_institution", "current_education_field",
     "sources",
 ]
 
@@ -88,8 +88,8 @@ def _build_csv_row(
             "employer_city": profile.employer_city,
             "employer_state": profile.employer_state,
             "continuing_education": profile.continuing_education,
-            "education_institution": profile.education_institution,
-            "education_field": profile.education_field,
+            "current_education_institution": profile.current_education_institution,
+            "current_education_field": profile.current_education_field,
             "sources": "; ".join(profile.sources),
         })
     else:
@@ -141,8 +141,8 @@ def _save_person_output(
             "employer_city": profile.employer_city,
             "employer_state": profile.employer_state,
             "continuing_education": profile.continuing_education,
-            "education_institution": profile.education_institution,
-            "education_field": profile.education_field,
+            "current_education_institution": profile.current_education_institution,
+            "current_education_field": profile.current_education_field,
             "sources": profile.sources,
         } if profile else None,
         "response": response,
@@ -160,6 +160,7 @@ def _save_person_output(
                     "input_tokens": usage.input_tokens,
                     "output_tokens": usage.output_tokens,
                     "thinking_tokens": usage.thinking_tokens,
+                    "cached_tokens": usage.cached_tokens,
                     "cost_usd": usage.cost_usd,
                 }
                 for model, usage in consumption.models.items()
@@ -178,8 +179,8 @@ async def process_person(
     person: PersonInitialDescription,
     csv_path: str,
     outdir: str,
-) -> tuple[float, float, bool]:
-    """Process one person, write the result row to the CSV, return (cost, elapsed, found)."""
+) -> tuple[float, float, bool, int]:
+    """Process one person, write the result row to the CSV, return (cost, elapsed, found, coresignal_calls)."""
     name = f"{person.first_name} {person.last_name}"
 
     # Add a per-person log file handler (captures everything shown on terminal)
@@ -190,6 +191,7 @@ async def process_person(
 
     start = time.time()
     total_cost = 0.0
+    coresignal_count = 0
     error = ""
     found = False
     confidence = ""
@@ -217,9 +219,11 @@ async def process_person(
                 usage.thinking_tokens, cost,
             )
         logger.info("Tool calls: {}", consumption_data.tool_calls_used)
+        if consumption_data.coresignal_calls:
+            for tool_name, count in consumption_data.coresignal_calls.items():
+                logger.info("Coresignal | {} = {}", tool_name, count)
+            coresignal_count = sum(consumption_data.coresignal_calls.values())
 
-    except LinkedInFatalError:
-        raise
     except Exception as e:
         logger.exception(e)
         logger.error("{} -> ERROR: {}", name, e)
@@ -238,7 +242,7 @@ async def process_person(
     # Remove per-person log handler
     logger.remove(log_id)
 
-    return total_cost, elapsed, found
+    return total_cost, elapsed, found, coresignal_count
 
 
 # ── main ───────────────────────────────────────────────────
@@ -278,6 +282,7 @@ async def main() -> None:
     total_cost = 0.0
     total_elapsed = 0.0
     found_count = 0
+    total_coresignal = 0
     total_persons = len(persons)
 
     for i, (school_id, person) in enumerate(persons, 1):
@@ -285,23 +290,24 @@ async def main() -> None:
             "[{}/{}] Processing: {} {}",
             i, total_persons, person.first_name, person.last_name,
         )
-        cost, elapsed, found = await process_person(school_id, person, args.output, args.outdir)
+        cost, elapsed, found, cs_calls = await process_person(school_id, person, args.output, args.outdir)
         total_cost += cost
         total_elapsed += elapsed
+        total_coresignal += cs_calls
         if found:
             found_count += 1
 
         avg_time = total_elapsed / i
         logger.info(
-            "\033[47;30m PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{} \033[0m",
-            i, total_persons, total_cost, avg_time, found_count, i,
+            "\033[47;30m PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{} | CS calls: {} \033[0m",
+            i, total_persons, total_cost, avg_time, found_count, i, total_coresignal,
         )
 
     # ── totals summary ────────────────────────────────────
     logger.info("=================================================")
     logger.info(
-        "TOTAL COST USD: ${:.6f} | TIME: {:.1f}s | PERSONS: {} | FOUND: {}",
-        total_cost, total_elapsed, total_persons, found_count,
+        "TOTAL COST USD: ${:.6f} | TIME: {:.1f}s | PERSONS: {} | FOUND: {} | CS calls: {}",
+        total_cost, total_elapsed, total_persons, found_count, total_coresignal,
     )
 
 
