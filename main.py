@@ -16,7 +16,7 @@ from typing import Optional
 
 from loguru import logger
 
-from agent import PersonInitialDescription, PersonProfile, run_agent
+from agent import PersonInitialDescription, PersonProfile, LinkedInFatalError, run_agent
 from google_sheets import load_persons
 
 
@@ -218,6 +218,8 @@ async def process_person(
             )
         logger.info("Tool calls: {}", consumption_data.tool_calls_used)
 
+    except LinkedInFatalError:
+        raise
     except Exception as e:
         logger.exception(e)
         logger.error("{} -> ERROR: {}", name, e)
@@ -291,7 +293,7 @@ async def main() -> None:
 
         avg_time = total_elapsed / i
         logger.info(
-            "PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{}",
+            "\033[47;30m PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{} \033[0m",
             i, total_persons, total_cost, avg_time, found_count, i,
         )
 

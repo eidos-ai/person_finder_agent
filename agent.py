@@ -33,8 +33,18 @@ from skills.fetch_linkedin import (
     search_profiles as _search_profiles,
     get_full_linkedin_profile as _get_full_linkedin_profile,
     FullLinkedinProfile,
+    NotAuthenticatedError as _NotAuthError,
+    PageLoadError as _PageLoadError,
     _extract_json,
 )
+
+
+class LinkedInFatalError(BaseException):
+    """Raised when LinkedIn cannot be fetched (e.g. not authenticated). Stops the entire run."""
+    pass
+
+
+
 from skills.fetch_google import (
     EmptyLLMResponseError as _GoogleEmptyError,
     fetch_page_content as _fetch_page_content,
@@ -236,7 +246,10 @@ def search_linkedin_profiles(keywords: str) -> str:
     Returns:
         Formatted search results, one profile per line.
     """
-    profiles, usage = _search_profiles(keywords)
+    try:
+        profiles, usage = _search_profiles(keywords)
+    except (_NotAuthError, _PageLoadError) as exc:
+        raise LinkedInFatalError(f"LinkedIn fetch failed: {exc}") from exc
     _tool_token_usages.append(usage)
 
     if not profiles:
@@ -262,7 +275,10 @@ def get_linkedin_job_info(profile_url: str) -> str:
         Employment and education details from the profile.
     """
     global _last_profile
-    info, usage = _get_full_linkedin_profile(profile_url)
+    try:
+        info, usage = _get_full_linkedin_profile(profile_url)
+    except (_NotAuthError, _PageLoadError) as exc:
+        raise LinkedInFatalError(f"LinkedIn fetch failed: {exc}") from exc
     _tool_token_usages.append(usage)
     _last_profile = info
     _profile_sources.append(profile_url)

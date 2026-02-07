@@ -104,6 +104,8 @@ def fetch_linkedin_html(url: str = "https://www.linkedin.com/feed", wait: int = 
             main = driver.find_element("tag name", "main")
             html = main.get_attribute("outerHTML")
         except Exception:
+
+            
             pass
 
         return html
