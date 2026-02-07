@@ -13,11 +13,10 @@ import sys
 import time
 from typing import Optional
 
-import pandas as pd
 from loguru import logger
 
 from agent import PersonInitialDescription, PersonProfile, run_agent
-from google_api import _gs
+from google_sheets import load_persons
 
 
 # ── CSV columns ────────────────────────────────────────────
@@ -35,54 +34,6 @@ PROFILE_FIELDS = [
 ]
 
 CSV_COLUMNS = INPUT_FIELDS + PROFILE_FIELDS + ["error", "cost_usd", "elapsed_seconds"]
-
-
-# ── spreadsheet loader ─────────────────────────────────────
-
-def load_persons(
-    spreadsheet_id: str,
-    start: Optional[int] = None,
-    end: Optional[int] = None,
-) -> list[PersonInitialDescription]:
-    """
-    Load persons from Google Sheets.
-
-    Args:
-        spreadsheet_id: Google Sheets spreadsheet ID
-        start: Optional start row index (0-based)
-        end: Optional end row index (exclusive)
-
-    Returns:
-        List of PersonInitialDescription instances
-    """
-    sheet = _gs.open_by_key(spreadsheet_id).worksheet("DataImport")
-    data = sheet.get_all_values()
-    if not data:
-        return []
-
-    headers = data[0]
-    rows = data[1:]
-
-    # Apply row range if specified
-    if start is not None:
-        rows = rows[start:]
-    if end is not None:
-        rows = rows[:end]
-
-    df = pd.DataFrame(rows, columns=headers)
-
-    persons = []
-    for _, row in df.iterrows():
-        persons.append(PersonInitialDescription(
-            first_name=row["FirstName"],
-            last_name=row["LastName"],
-            city=row["City"],
-            state=row["State"],
-            school_name=row["SchoolName"],
-            school_department=row["Department"],
-            graduation_date=row["Graduation"],
-        ))
-    return persons
 
 
 # ── CSV helpers ────────────────────────────────────────────

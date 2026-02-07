@@ -19,8 +19,8 @@ from loguru import logger
 from token_usage import TokenUsage, extract_token_usage
 
 CHROMIUM_BIN = "/Applications/Chromium.app/Contents/MacOS/Chromium"
-MASTER_PROFILE_DIR = "/Users/cristiangonzalez/.chromium-profiles/linkedin"
-GCP_SA_PATH = "/Users/cristiangonzalez/Desktop/git/js_person_finder/gcp-sa Manuel_Correa JS.json"
+MASTER_PROFILE_DIR = "~/.chromium-profiles/linkedin"
+GCP_SA_PATH = "gcp-sa Manuel_Correa JS.json"
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_SA_PATH
 
