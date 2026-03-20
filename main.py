@@ -17,6 +17,7 @@ from typing import Optional
 from loguru import logger
 
 from agent import PersonInitialDescription, PersonProfile, run_agent
+from coresignal import get_credits_remaining
 from google_sheets import load_persons
 
 
@@ -53,6 +54,24 @@ def _append_csv_row(path: str, row: dict) -> None:
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writerow(row)
+
+
+def _load_existing_output_ids(path: str) -> set[str]:
+    """Load already-processed school_id values from an output CSV."""
+    if not os.path.exists(path):
+        return set()
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        if "school_id" not in (reader.fieldnames or []):
+            return set()
+
+        existing_ids: set[str] = set()
+        for row in reader:
+            school_id = (row.get("school_id") or "").strip()
+            if school_id:
+                existing_ids.add(school_id)
+        return existing_ids
 
 
 def _build_csv_row(
@@ -254,6 +273,11 @@ async def main() -> None:
     parser.add_argument("spreadsheet_id", help="Google Sheets spreadsheet ID")
     parser.add_argument("--start", type=int, default=None, help="Start row index (0-based)")
     parser.add_argument("--end", type=int, default=None, help="End row index (exclusive)")
+    parser.add_argument(
+        "--target-ids",
+        default=None,
+        help="Path to JSON file with School IDs to process (disables --start/--end).",
+    )
     parser.add_argument("--output", default="results.csv", help="Output CSV path (default: results.csv)")
     parser.add_argument("--outdir", default="outs", help="Directory for per-person output files (default: outs)")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
@@ -265,18 +289,51 @@ async def main() -> None:
     log_level = "DEBUG" if args.debug else "INFO"
     logger.add(sys.stderr, level=log_level)
 
+    if args.target_ids and (args.start is not None or args.end is not None):
+        raise ValueError("When --target-ids is provided, --start and --end cannot be used.")
+
+    target_ids: set[str] | None = None
+    if args.target_ids:
+        with open(args.target_ids) as f:
+            payload = json.load(f)
+        if not isinstance(payload, list):
+            raise ValueError(f"--target-ids file must contain a JSON array: {args.target_ids}")
+        target_ids = {str(item).strip() for item in payload if str(item).strip()}
+        logger.info("Loaded {} target School IDs from {}", len(target_ids), args.target_ids)
+
     # ── load persons from spreadsheet ─────────────────────
     logger.info("Loading persons from spreadsheet: {}", args.spreadsheet_id)
-    persons = load_persons(args.spreadsheet_id, start=args.start, end=args.end)
-    logger.info("Loaded {} persons (start={}, end={})", len(persons), args.start, args.end)
+    load_start = None if target_ids is not None else args.start
+    load_end = None if target_ids is not None else args.end
+    persons = load_persons(args.spreadsheet_id, start=load_start, end=load_end)
+
+    if target_ids is not None:
+        persons = [(school_id, person) for school_id, person in persons if str(school_id).strip() in target_ids]
+        logger.info(
+            "Loaded {} persons after applying target IDs filter (full sheet loaded first)",
+            len(persons),
+        )
+    else:
+        logger.info("Loaded {} persons (start={}, end={})", len(persons), args.start, args.end)
+
+    # ── ensure CSV header exists ──────────────────────────
+    existing_ids = _load_existing_output_ids(args.output)
+    if existing_ids:
+        before = len(persons)
+        persons = [(school_id, person) for school_id, person in persons if str(school_id).strip() not in existing_ids]
+        logger.info(
+            "Skipped {} persons already present in {}. Remaining: {}",
+            before - len(persons),
+            args.output,
+            len(persons),
+        )
+
+    _ensure_csv_header(args.output)
+    logger.info("Writing results to: {}", args.output)
 
     if not persons:
         logger.warning("No persons to process.")
         return
-
-    # ── ensure CSV header exists ──────────────────────────
-    _ensure_csv_header(args.output)
-    logger.info("Writing results to: {}", args.output)
 
     # ── process each person sequentially ──────────────────
     total_cost = 0.0
@@ -284,6 +341,8 @@ async def main() -> None:
     found_count = 0
     total_coresignal = 0
     total_persons = len(persons)
+    cs_credits: int | None = None
+    cs_credits_checked_at = 0  # profile index when credits were last checked
 
     for i, (school_id, person) in enumerate(persons, 1):
         logger.info(
@@ -298,9 +357,21 @@ async def main() -> None:
             found_count += 1
 
         avg_time = total_elapsed / i
+
+        # Check Coresignal credits every 20 profiles (and on the first one)
+        if cs_credits is None or (i - cs_credits_checked_at) >= 20:
+            cs_credits = get_credits_remaining()
+            cs_credits_checked_at = i
+
+        profiles_ago = i - cs_credits_checked_at
+        if cs_credits is not None:
+            credits_str = f"{cs_credits} ({profiles_ago} profiles ago)" if profiles_ago > 0 else str(cs_credits)
+        else:
+            credits_str = "?"
+
         logger.info(
-            "\033[47;30m PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{} | CS calls: {} \033[0m",
-            i, total_persons, total_cost, avg_time, found_count, i, total_coresignal,
+            "\033[47;30m PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{} | CS calls: {} | CS credits: {} \033[0m",
+            i, total_persons, total_cost, avg_time, found_count, i, total_coresignal, credits_str,
         )
 
     # ── totals summary ────────────────────────────────────
@@ -319,4 +390,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.exception("Error: {}", e)
         raise
-

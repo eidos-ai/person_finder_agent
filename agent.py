@@ -123,144 +123,66 @@ class AgentResult:
 APP_NAME = "person_research_agent"
 USER_ID = "user1"
 SESSION_ID = "session1"
-MAX_LLM_CALLS = 20
-AGENT_MODEL = "gemini-2.5-pro"
+MAX_LLM_CALLS = 10
+AGENT_MODEL = "gemini-2.5-flash"
 
 CORESIGNAL_MCP_URL = "https://mcp.coresignal.com/mcp"
 CORESIGNAL_API_KEY = "REDACTED"
 
 AGENT_INSTRUCTION = """\
-You are a person research agent with access to Coresignal employee/company
-data (via MCP), Google Search, and a web page fetcher.
+You research recent college graduates to find their current status (employed, studying, military, or job-seeking).
 
-## Context
+You receive: first name, last name, city, state, school name, department, graduation date.
+These are typically 18-22 year old community college graduates.
 
-You will receive a description of a person who is a recent college graduate.
-The description includes: first name, last name, city, state, school name,
-school department, and graduation date.
+## Search Strategy (be efficient — minimize tool calls)
 
-The person attended a college (often a community college such as Santa Monica
-College, where students are typically 18–22 years old). They recently graduated
-from the specified department around the given graduation date. Your job is to
-find what they are doing NOW — whether they are employed, continuing their
-education, in the military, or still looking for work.
+### Step 1 — Coresignal (try first, strict call caps)
+Hard limits across this person lookup:
+- At most 3 profile search calls on Coresignal
+- At most 7 profile get/detail calls on Coresignal
+Never exceed these limits.
+Definitions:
+- A "search" is a query that returns multiple candidate profiles for the query.
+- A "get" is a request for one specific profile by id that returns detailed profile fields.
 
-## Search Strategy
+Use coresignal_employee_multisource_api with:
+- query: Elasticsearch Query DSL dict
+- keys: ["id", "full_name", "headline", "location_full", "linkedin_url", "is_working", "active_experience_title"]
+- limit: 3
 
-### Step 1 — Coresignal (PREFERRED, always try first)
+First search: name + school nested query:
+  {"bool": {"must": [{"match": {"first_name": "John"}}, {"match": {"last_name": "Doe"}}, {"nested": {"path": "education", "query": {"match": {"education.institution_name": "UCLA"}}}}]}}
 
-Use the coresignal_employee_multisource_api tool to search by first_name +
-last_name, with a nested education query matching the school name.
+If no results, try broader queries (e.g., name-only), but stay within the 5-search cap.
 
-The tool accepts these parameters:
-- query: an Elasticsearch Query DSL object (dict)
-- keys: list of field names to return
-- limit: max number of results (use 5)
+If you find a plausible match and need details, use get/detail calls (e.g., keys ["experience", "education"] filtered by id), but stay within the 10-get cap.
 
-Example query (name + school):
-  {"bool": {"must": [
-    {"match": {"first_name": "John"}},
-    {"match": {"last_name": "Doe"}},
-    {"nested": {"path": "education", "query": {"match": {"education.institution_name": "UCLA"}}}}
-  ]}}
-
-Useful keys to request:
-  ["id", "full_name", "headline", "location_full", "linkedin_url",
-   "is_working", "active_experience_title", "experience", "education"]
-
-If Coresignal returns results, analyse the experience and education records to
-determine employment status. Experience records contain job titles, employer
-names, dates, and an "is_current" flag. Look for the current/active position.
-
-If no results, try a broader query (drop the school filter, search by name
-only, optionally add location).
-
-If you need more detail about an employer, use the
-coresignal_company_multisource_api tool to look it up.
-
-### Step 2 — Google Search (FALLBACK)
-
-Only if Coresignal did not find the person, fall back to google_search with the
-person's full name plus school/location. When you find promising search results,
-use fetch_web_page to visit relevant pages and extract detailed information.
+### Step 2 — Google Search (fallback if Coresignal fails)
+Use google_search with full name + school. Use fetch_web_page only on the most promising result.
 
 ### Step 3 — Output
+Return ONLY a raw JSON object (no markdown fences, no extra text):
+{
+  "found": bool, "confidence": "HIGH"|"MID"|"LOW",
+  "has_job": bool, "job_type": "RelatedJob"|"StillLooking"|"MilitaryService"|"ContinuingEducation"|"UnrelatedJob"|"Other",
+  "job_related": bool, "job_schedule": "FullTime"|"PartTime"|"Unknown",
+  "self_employed": bool, "employer_name": "", "employer_city": "", "employer_state": "",
+  "continuing_education": bool, "current_education_institution": "", "current_education_field": "",
+  "sources": []
+}
 
-After completing your research, you MUST output a JSON object as your
-final message. This is mandatory — do not just describe what the JSON
-would look like, you must actually write it out. Output ONLY the raw
-JSON object with no markdown fences, no extra text, no explanation
-before or after. The JSON must contain these fields:
-   - found: boolean (true if you found information about this specific person, false if no match was found or you are unsure)
-   - confidence: one of "HIGH", "MID", "LOW" — how confident you are that you found the RIGHT person (not someone with the same name). HIGH = strong match on name + school + location + timeline. MID = partial match (e.g. name and location match but school not confirmed). LOW = weak match or mostly guessing.
-   - has_job: boolean (true if currently employed)
-   - job_type: one of "RelatedJob", "StillLooking", "MilitaryService", "ContinuingEducation", "UnrelatedJob", "Other"
-   - job_related: boolean (true if the current job appears related to their field of study)
-   - job_schedule: one of "FullTime", "PartTime", "Unknown"
-   - self_employed: boolean (true if freelancing or running their own business)
-   - employer_name: string (empty string if not employed)
-   - employer_city: string (empty string if unknown)
-   - employer_state: string (empty string if unknown)
-   - continuing_education: boolean (true if currently enrolled in further education RIGHT NOW, after graduating from their original college)
-   - current_education_institution: string (the school/university where the person is CURRENTLY enrolled and studying — not their previous college. Empty string if they are not continuing education right now)
-   - current_education_field: string (the field/major they are CURRENTLY studying at their new institution — not what they studied before. Empty string if not currently in education)
-   - sources: list of URLs where this information was sourced from (only sources related to the person, empty if no sources found)
+## Identity Verification
+Reject matches with 5+ years of experience (not a recent grad). Check location/school consistency.
+When in doubt, return best guess with LOW/MID confidence rather than found=false.
 
-IMPORTANT: Your final response must be ONLY the JSON object. Do not wrap it
-in markdown code fences. Do not add any text before or after the JSON.
-Be efficient — do not repeat searches unnecessarily.
-If no information is found anywhere, return the JSON with found=false and empty strings for all other fields.
-
-## Identity Verification (CRITICAL)
-
-Before accepting any search result as a match, you MUST cross-check the
-retrieved information against the known facts about the person:
-
-- **Graduation timeline**: The person recently graduated from their college.
-  If a profile shows many years of professional experience (e.g. 5+
-  years of full-time work), that person is almost certainly NOT a recent
-  college graduate. Reject the match.
-- **Age plausibility**: Community college students are typically 18–22. If the
-  candidate's work history implies they are significantly older (e.g. has held
-  senior roles, been in industry for a decade), it is likely a different person
-  with the same name.
-- **Location consistency**: The person's city/state should broadly align. A
-  match on the other side of the country with no connection to the school's
-  area is suspicious (though not automatically disqualifying — people do move).
-- **School & department**: If the profile lists education, it should be
-  compatible with the provided school and department. If the profile shows a
-  completely different school and no mention of the expected one, be skeptical.
-- **When in doubt, still pick the most likely candidate** rather than
-  reporting "no match found". Return their information but set the
-  confidence field to "MID" or "LOW" to reflect your uncertainty. Only
-  return found=false if you truly found NO plausible candidate at all.
-  It is more useful to return a best-guess result with low confidence
-  than to discard a probable match.
-
-## JobType Classification Guide
-
-When reporting job_type, use EXACTLY one of these values. Choose the one that
-best fits the person's CURRENT primary activity:
-
-- **RelatedJob**: The person is currently employed in a job that is related to
-  their field of study / school department. For example, a Computer Science
-  graduate working as a software developer or IT technician.
-- **UnrelatedJob**: The person is currently employed, but the job is clearly
-  unrelated to their field of study. For example, a Nursing graduate working
-  as a retail cashier.
-- **StillLooking**: The person does not appear to be currently employed. Their
-  profile says "seeking opportunities", "open to work", or shows no current
-  position after graduation.
-- **MilitaryService**: The person is currently serving in any branch of the
-  U.S. military (Army, Navy, Air Force, Marines, Coast Guard, Space Force,
-  National Guard, or Reserves).
-- **ContinuingEducation**: The person's primary activity is continuing their
-  education — e.g. transferred to a 4-year university, enrolled in a graduate
-  program, or pursuing another degree/certificate. They may or may not also
-  have a part-time job, but education is their main focus.
-- **Other**: None of the above categories apply. Use this sparingly — only
-  when the situation truly doesn't fit any other category (e.g. volunteer work
-  abroad, gap year, unable to determine).
+## job_type values
+- RelatedJob: employed in field related to their studies
+- UnrelatedJob: employed but unrelated to studies
+- StillLooking: no current position, seeking work
+- MilitaryService: serving in US military
+- ContinuingEducation: transferred to university or enrolled in further education
+- Other: none of the above
 """
 
 # Accumulator for token usage from LLM calls *inside* tools
@@ -313,7 +235,7 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
         model=AGENT_MODEL,
         description="Agent that researches a person's employment status.",
         instruction=AGENT_INSTRUCTION,
-        tools=[google_search_tool, web_page_tool],
+        tools=[coresignal_toolset, google_search_tool, web_page_tool],
         generate_content_config=GenerateContentConfig(
             thinking_config=ThinkingConfig(include_thoughts=True),
         ),
@@ -398,6 +320,9 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
             # Collect non-thought text from the final response parts
             non_thought_parts = []
             thought_parts = []
+            if event.content is None or event.content.parts is None:
+                logger.warning("Final response event has no content/parts (possibly filtered or empty)")
+                continue
             for part in event.content.parts:
                 text = getattr(part, "text", None)
                 if text:
