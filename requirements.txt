@@ -2,6 +2,7 @@ loguru
 google-genai
 google-adk
 selenium
+requests
 gspread
 pandas
 google-auth

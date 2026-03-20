@@ -17,6 +17,10 @@ def get_credits_remaining() -> int | None:
 
     Returns the number of remaining credits, or None on failure.
     """
+    if not CORESIGNAL_API_KEY:
+        logger.warning("CORESIGNAL_API_KEY env var is not set; cannot fetch credits remaining.")
+        return None
+
     headers = {"apikey": CORESIGNAL_API_KEY, "Content-Type": "application/json"}
 
     try:

@@ -19,7 +19,7 @@ from loguru import logger
 from token_usage import TokenUsage, extract_token_usage
 
 CHROMIUM_BIN = "/Applications/Chromium.app/Contents/MacOS/Chromium"
-MASTER_PROFILE_DIR = "~/.chromium-profiles/linkedin"
+MASTER_PROFILE_DIR = os.path.expanduser("~/.chromium-profiles/linkedin")
 GCP_SA_PATH = "gcp-sa Manuel_Correa JS.json"
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_SA_PATH
@@ -191,6 +191,7 @@ def search_profiles(keywords: str) -> tuple[list[LinkedInProfile], TokenUsage]:
             input_tokens=0,
             output_tokens=0,
             thinking_tokens=0,
+            cached_tokens=0,
             cost_usd=0.0,
         )
         return [], empty_usage

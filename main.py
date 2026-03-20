@@ -198,8 +198,12 @@ async def process_person(
     person: PersonInitialDescription,
     csv_path: str,
     outdir: str,
+    source: str,
 ) -> tuple[float, float, bool, int]:
-    """Process one person, write the result row to the CSV, return (cost, elapsed, found, coresignal_calls)."""
+    """Process one person, write the result row to the CSV.
+
+    Returns: (cost, elapsed, found, coresignal_calls).
+    """
     name = f"{person.first_name} {person.last_name}"
 
     # Add a per-person log file handler (captures everything shown on terminal)
@@ -219,7 +223,7 @@ async def process_person(
     consumption_data = None
 
     try:
-        result = await run_agent(person)
+        result = await run_agent(person, source=source)
         found = result.found
         confidence = result.confidence.value
         profile = result.profile
@@ -280,6 +284,12 @@ async def main() -> None:
     )
     parser.add_argument("--output", default="results.csv", help="Output CSV path (default: results.csv)")
     parser.add_argument("--outdir", default="outs", help="Directory for per-person output files (default: outs)")
+    parser.add_argument(
+        "--source",
+        choices=["coresignal", "local"],
+        default=os.environ.get("PERSON_FINDER_SOURCE", "coresignal"),
+        help="Where to fetch LinkedIn profiles from: `coresignal` (default) or `local` (headless browser).",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
 
     args = parser.parse_args()
@@ -341,6 +351,7 @@ async def main() -> None:
     found_count = 0
     total_coresignal = 0
     total_persons = len(persons)
+    source_is_coresignal = args.source == "coresignal"
     cs_credits: int | None = None
     cs_credits_checked_at = 0  # profile index when credits were last checked
 
@@ -349,7 +360,13 @@ async def main() -> None:
             "[{}/{}] Processing: {} {}",
             i, total_persons, person.first_name, person.last_name,
         )
-        cost, elapsed, found, cs_calls = await process_person(school_id, person, args.output, args.outdir)
+        cost, elapsed, found, cs_calls = await process_person(
+            school_id,
+            person,
+            args.output,
+            args.outdir,
+            source=args.source,
+        )
         total_cost += cost
         total_elapsed += elapsed
         total_coresignal += cs_calls
@@ -358,16 +375,21 @@ async def main() -> None:
 
         avg_time = total_elapsed / i
 
-        # Check Coresignal credits every 20 profiles (and on the first one)
-        if cs_credits is None or (i - cs_credits_checked_at) >= 20:
-            cs_credits = get_credits_remaining()
-            cs_credits_checked_at = i
+        # Check Coresignal credits every 20 profiles (and on the first one).
+        # In `local` mode, we do not query Coresignal.
+        credits_str = "n/a"
+        if source_is_coresignal:
+            if cs_credits is None or (i - cs_credits_checked_at) >= 20:
+                cs_credits = get_credits_remaining()
+                cs_credits_checked_at = i
 
-        profiles_ago = i - cs_credits_checked_at
-        if cs_credits is not None:
-            credits_str = f"{cs_credits} ({profiles_ago} profiles ago)" if profiles_ago > 0 else str(cs_credits)
-        else:
-            credits_str = "?"
+            profiles_ago = i - cs_credits_checked_at
+            if cs_credits is not None:
+                credits_str = (
+                    f"{cs_credits} ({profiles_ago} profiles ago)" if profiles_ago > 0 else str(cs_credits)
+                )
+            else:
+                credits_str = "?"
 
         logger.info(
             "\033[47;30m PROGRESS: {}/{} | Cost: ${:.4f} | Avg time: {:.1f}s | Found: {}/{} | CS calls: {} | CS credits: {} \033[0m",

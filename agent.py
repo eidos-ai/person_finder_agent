@@ -33,6 +33,10 @@ from google.genai.types import GenerateContentConfig, ThinkingConfig
 from skills.fetch_google import (
     fetch_page_content as _fetch_page_content,
 )
+from skills.fetch_linkedin import (
+    search_profiles as _linkedin_search_profiles,
+    get_full_linkedin_profile as _get_full_linkedin_profile,
+)
 from token_usage import (
     TokenUsage,
     compute_cost_usd,
@@ -127,9 +131,10 @@ MAX_LLM_CALLS = 10
 AGENT_MODEL = "gemini-2.5-flash"
 
 CORESIGNAL_MCP_URL = "https://mcp.coresignal.com/mcp"
-CORESIGNAL_API_KEY = "REDACTED"
+# Prefer env var so secrets aren't committed to source control.
+CORESIGNAL_API_KEY = os.environ.get("CORESIGNAL_API_KEY")
 
-AGENT_INSTRUCTION = """\
+CORESIGNAL_AGENT_INSTRUCTION = """\
 You research recent college graduates to find their current status (employed, studying, military, or job-seeking).
 
 You receive: first name, last name, city, state, school name, department, graduation date.
@@ -185,6 +190,52 @@ When in doubt, return best guess with LOW/MID confidence rather than found=false
 - Other: none of the above
 """
 
+LOCAL_AGENT_INSTRUCTION = """\
+You research recent college graduates to find their current status (employed, studying, military, or job-seeking).
+
+You receive: first name, last name, city, state, school name, department, graduation date.
+These are typically 18-22 year old community college graduates.
+
+## Search Strategy (be efficient — minimize tool calls)
+
+### Step 1 — Local LinkedIn (try first, strict call caps)
+Hard limits across this person lookup:
+- At most 3 LinkedIn search calls (using `linkedin_search_profiles`)
+- At most 7 LinkedIn profile detail calls (using `linkedin_get_full_profile`)
+
+Use `linkedin_search_profiles` with keywords derived from:
+  - The provided first name, last name, and school name
+  - If needed, broaden to first name + last name (still within the call cap)
+
+If you find a plausible match, use `linkedin_get_full_profile(profile_url)` to retrieve profile markdown text.
+
+### Step 2 — Google Search (fallback if local LinkedIn fails)
+Use `google_search` with full name + school. Use `fetch_web_page` only on the most promising result.
+
+### Step 3 — Output
+Return ONLY a raw JSON object (no markdown fences, no extra text):
+{
+  "found": bool, "confidence": "HIGH"|"MID"|"LOW",
+  "has_job": bool, "job_type": "RelatedJob"|"StillLooking"|"MilitaryService"|"ContinuingEducation"|"UnrelatedJob"|"Other",
+  "job_related": bool, "job_schedule": "FullTime"|"PartTime"|"Unknown",
+  "self_employed": bool, "employer_name": "", "employer_city": "", "employer_state": "",
+  "continuing_education": bool, "current_education_institution": "", "current_education_field": "",
+  "sources": []
+}
+
+## Identity Verification
+Reject matches with 5+ years of experience (not a recent grad). Check location/school consistency.
+When in doubt, return best guess with LOW/MID confidence rather than found=false.
+
+## job_type values
+- RelatedJob: employed in field related to their studies
+- UnrelatedJob: employed but unrelated to studies
+- StillLooking: no current position, seeking work
+- MilitaryService: serving in US military
+- ContinuingEducation: transferred to university or enrolled in further education
+- Other: none of the above
+"""
+
 # Accumulator for token usage from LLM calls *inside* tools
 _tool_token_usages: list[TokenUsage] = []
 _profile_sources: list[str] = []
@@ -208,34 +259,81 @@ def fetch_web_page(url: str) -> str:
     return content
 
 
+# LinkedIn (local headless browser) tool wrappers
+def linkedin_search_profiles(keywords: str) -> list[dict]:
+    """Search LinkedIn people results page and return candidate profile URLs."""
+    profiles, usage = _linkedin_search_profiles(keywords)
+    _tool_token_usages.append(usage)
+
+    # Return only JSON-safe primitives (ADK tool serialization is simplest here).
+    return [
+        {
+            "name": p.name,
+            "headline": p.headline,
+            "location": p.location,
+            "profile_url": p.profile_url,
+        }
+        for p in profiles
+        if getattr(p, "profile_url", None)
+    ]
+
+
+def linkedin_get_full_profile(profile_url: str) -> str:
+    """Fetch a LinkedIn profile page and convert it to markdown via Gemini."""
+    full_profile, usage = _get_full_linkedin_profile(profile_url)
+    _tool_token_usages.append(usage)
+    _profile_sources.append(profile_url)
+    return full_profile.markdown
+
+
 # ── ADK tool definitions ──────────────────────────────────
 
 google_search_tool = GoogleSearchTool(bypass_multi_tools_limit=True)
 web_page_tool = FunctionTool(fetch_web_page)
+linkedin_search_tool = FunctionTool(linkedin_search_profiles)
+linkedin_get_full_profile_tool = FunctionTool(linkedin_get_full_profile)
 
 
 # ── runner ─────────────────────────────────────────────────
 
-async def run_agent(person: PersonInitialDescription) -> AgentResult:
-    """Run the person research agent for the given person."""
+async def run_agent(person: PersonInitialDescription, source: str = "coresignal") -> AgentResult:
+    """Run the person research agent for the given person.
+
+    source:
+      - `coresignal`: use Coresignal MCP tools for LinkedIn profile search/details
+      - `local`: use local Selenium headless browser tools from `skills/fetch_linkedin.py`
+    """
     _tool_token_usages.clear()
     _profile_sources.clear()
 
-    # Create MCP toolset for Coresignal (per-run lifecycle)
-    coresignal_toolset = McpToolset(
-        connection_params=StreamableHTTPConnectionParams(
-            url=CORESIGNAL_MCP_URL,
-            headers={"apikey": CORESIGNAL_API_KEY},
-            timeout=30,
-        ),
-    )
+    if source not in ("coresignal", "local"):
+        raise ValueError(f"Unknown source={source}. Expected 'coresignal' or 'local'.")
+
+    if source == "coresignal":
+        if not CORESIGNAL_API_KEY:
+            raise ValueError("CORESIGNAL_API_KEY is required for source='coresignal'.")
+
+        # Create MCP toolset for Coresignal (per-run lifecycle)
+        coresignal_toolset = McpToolset(
+            connection_params=StreamableHTTPConnectionParams(
+                url=CORESIGNAL_MCP_URL,
+                headers={"apikey": CORESIGNAL_API_KEY},
+                timeout=30,
+            ),
+        )
+        tools = [coresignal_toolset, google_search_tool, web_page_tool]
+        instruction = CORESIGNAL_AGENT_INSTRUCTION
+    else:
+        # `local` mode: no Coresignal MCP tools.
+        tools = [linkedin_search_tool, linkedin_get_full_profile_tool, google_search_tool, web_page_tool]
+        instruction = LOCAL_AGENT_INSTRUCTION
 
     agent = Agent(
         name="person_research_agent",
         model=AGENT_MODEL,
         description="Agent that researches a person's employment status.",
-        instruction=AGENT_INSTRUCTION,
-        tools=[coresignal_toolset, google_search_tool, web_page_tool],
+        instruction=instruction,
+        tools=tools,
         generate_content_config=GenerateContentConfig(
             thinking_config=ThinkingConfig(include_thoughts=True),
         ),
@@ -415,11 +513,12 @@ async def run_agent(person: PersonInitialDescription) -> AgentResult:
     else:
         logger.warning("Could not parse structured profile from agent response")
 
-    # Close the MCP toolset
-    try:
-        await coresignal_toolset.close()
-    except RuntimeError:
-        pass  # anyio cancel scope cleanup — known ADK/MCP issue
+    # Close the MCP toolset (coresignal mode only)
+    if source == "coresignal":
+        try:
+            await coresignal_toolset.close()
+        except RuntimeError:
+            pass  # anyio cancel scope cleanup — known ADK/MCP issue
 
     return AgentResult(
         found=person_found,
