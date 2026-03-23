@@ -5,9 +5,12 @@ Google Sheets helper — loads persons from a spreadsheet.
 from typing import Optional
 
 import pandas as pd
+import gspread
 
 from agent import PersonInitialDescription
 from google_api import _gs
+
+RESULTS_SHEET_TITLE = "Results"
 
 
 def load_persons(
@@ -53,3 +56,70 @@ def load_persons(
         )
         persons.append((school_id, person))
     return persons
+
+
+def get_or_create_results_sheet(
+    spreadsheet_id: str,
+    fieldnames: list[str],
+) -> gspread.Worksheet:
+    """
+    Return the Results worksheet, creating it with a header row if missing.
+    """
+    sh = _gs.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet(RESULTS_SHEET_TITLE)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(
+            title=RESULTS_SHEET_TITLE,
+            rows=10000,
+            cols=max(len(fieldnames), 1),
+        )
+        ws.append_row(fieldnames)
+        return ws
+
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(fieldnames)
+    return ws
+
+
+def get_processed_ids_from_sheet(spreadsheet_id: str) -> set[str]:
+    """
+    Load already-processed school_id values from the Results sheet.
+    Returns empty set if the sheet does not exist.
+    """
+    sh = _gs.open_by_key(spreadsheet_id)
+    try:
+        ws = sh.worksheet(RESULTS_SHEET_TITLE)
+    except gspread.exceptions.WorksheetNotFound:
+        return set()
+
+    data = ws.get_all_values()
+    if len(data) < 2:
+        return set()
+
+    headers = data[0]
+    try:
+        school_id_idx = headers.index("school_id")
+    except ValueError:
+        return set()
+
+    existing_ids: set[str] = set()
+    for row in data[1:]:
+        if school_id_idx < len(row):
+            sid = (row[school_id_idx] or "").strip()
+            if sid:
+                existing_ids.add(sid)
+    return existing_ids
+
+
+def append_sheet_row(
+    spreadsheet_id: str,
+    row: dict,
+    fieldnames: list[str],
+) -> None:
+    """Append one result row to the Results sheet (values in fieldnames order)."""
+    sh = _gs.open_by_key(spreadsheet_id)
+    ws = sh.worksheet(RESULTS_SHEET_TITLE)
+    values = [str(row.get(key, "") if row.get(key, "") is not None else "") for key in fieldnames]
+    ws.append_row(values)

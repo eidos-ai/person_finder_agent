@@ -2,7 +2,7 @@
 """
 Main entry point — loads persons from a Google Sheets spreadsheet,
 processes each through the LinkedIn profile agent, and writes results
-to a CSV file incrementally.
+to a CSV file or a "Results" worksheet incrementally.
 """
 
 import argparse
@@ -12,13 +12,19 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from typing import Optional
 
 from loguru import logger
 
 from agent import PersonInitialDescription, PersonProfile, run_agent
 from coresignal import get_credits_remaining
-from google_sheets import load_persons
+from google_sheets import (
+    append_sheet_row,
+    get_or_create_results_sheet,
+    get_processed_ids_from_sheet,
+    load_persons,
+)
 
 
 # ── CSV columns ────────────────────────────────────────────
@@ -196,11 +202,11 @@ def _save_person_output(
 async def process_person(
     school_id: str,
     person: PersonInitialDescription,
-    csv_path: str,
+    row_writer: Callable[[dict], None],
     outdir: str,
     source: str,
 ) -> tuple[float, float, bool, int]:
-    """Process one person, write the result row to the CSV.
+    """Process one person, write the result row via row_writer.
 
     Returns: (cost, elapsed, found, coresignal_calls).
     """
@@ -255,9 +261,9 @@ async def process_person(
     elapsed = time.time() - start
     logger.info("{} completed in {:.1f}s", name, elapsed)
 
-    # Write result to CSV immediately
+    # Write result row immediately (CSV or spreadsheet)
     row = _build_csv_row(school_id, person, profile, confidence, error, total_cost, elapsed)
-    _append_csv_row(csv_path, row)
+    row_writer(row)
 
     # Save per-person output file
     _save_person_output(school_id, person, profile, confidence, response_text, consumption_data, error, total_cost, elapsed, outdir)
@@ -272,7 +278,7 @@ async def process_person(
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Process persons from a Google Sheet and write LinkedIn results to CSV.",
+        description="Process persons from a Google Sheet and write LinkedIn results to CSV or the Results sheet.",
     )
     parser.add_argument("spreadsheet_id", help="Google Sheets spreadsheet ID")
     parser.add_argument("--start", type=int, default=None, help="Start row index (0-based)")
@@ -282,7 +288,12 @@ async def main() -> None:
         default=None,
         help="Path to JSON file with School IDs to process (disables --start/--end).",
     )
-    parser.add_argument("--output", default="results.csv", help="Output CSV path (default: results.csv)")
+    parser.add_argument("--output", default="results.csv", help="Output CSV path (default: results.csv); ignored with --write-to-sheet")
+    parser.add_argument(
+        "--write-to-sheet",
+        action="store_true",
+        help="Append results to the 'Results' worksheet in the same spreadsheet instead of a local CSV.",
+    )
     parser.add_argument("--outdir", default="outs", help="Directory for per-person output files (default: outs)")
     parser.add_argument(
         "--source",
@@ -326,20 +337,40 @@ async def main() -> None:
     else:
         logger.info("Loaded {} persons (start={}, end={})", len(persons), args.start, args.end)
 
-    # ── ensure CSV header exists ──────────────────────────
-    existing_ids = _load_existing_output_ids(args.output)
+    # ── resume: skip already-processed school_ids ─────────
+    if args.write_to_sheet:
+        if args.start is not None or args.end is not None:
+            existing_ids: set[str] = set()
+            logger.info("Sheet output: --start/--end set; resume from Results sheet disabled.")
+        else:
+            existing_ids = get_processed_ids_from_sheet(args.spreadsheet_id)
+            if existing_ids:
+                logger.info("Sheet output: resuming; {} school_id(s) already in Results sheet.", len(existing_ids))
+        output_dest = f"spreadsheet {args.spreadsheet_id} (Results)"
+        get_or_create_results_sheet(args.spreadsheet_id, CSV_COLUMNS)
+
+        def row_writer(row: dict) -> None:
+            append_sheet_row(args.spreadsheet_id, row, CSV_COLUMNS)
+
+    else:
+        existing_ids = _load_existing_output_ids(args.output)
+        output_dest = args.output
+        _ensure_csv_header(args.output)
+
+        def row_writer(row: dict) -> None:
+            _append_csv_row(args.output, row)
+
     if existing_ids:
         before = len(persons)
         persons = [(school_id, person) for school_id, person in persons if str(school_id).strip() not in existing_ids]
         logger.info(
             "Skipped {} persons already present in {}. Remaining: {}",
             before - len(persons),
-            args.output,
+            output_dest,
             len(persons),
         )
 
-    _ensure_csv_header(args.output)
-    logger.info("Writing results to: {}", args.output)
+    logger.info("Writing results to: {}", output_dest)
 
     if not persons:
         logger.warning("No persons to process.")
@@ -363,7 +394,7 @@ async def main() -> None:
         cost, elapsed, found, cs_calls = await process_person(
             school_id,
             person,
-            args.output,
+            row_writer,
             args.outdir,
             source=args.source,
         )
