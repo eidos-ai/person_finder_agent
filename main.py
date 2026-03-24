@@ -288,18 +288,19 @@ async def main() -> None:
         default=None,
         help="Path to JSON file with School IDs to process (disables --start/--end).",
     )
-    parser.add_argument("--output", default="results.csv", help="Output CSV path (default: results.csv); ignored with --write-to-sheet")
+    parser.add_argument("--output", default="results.csv", help="Output CSV path (default: results.csv); only used with --no-write-to-sheet")
     parser.add_argument(
-        "--write-to-sheet",
+        "--no-write-to-sheet",
         action="store_true",
-        help="Append results to the 'Results' worksheet in the same spreadsheet instead of a local CSV.",
+        dest="no_write_to_sheet",
+        help="Write results to a local CSV instead of the 'Results' worksheet in the spreadsheet.",
     )
     parser.add_argument("--outdir", default="outs", help="Directory for per-person output files (default: outs)")
     parser.add_argument(
         "--source",
         choices=["coresignal", "local"],
-        default=os.environ.get("PERSON_FINDER_SOURCE", "coresignal"),
-        help="Where to fetch LinkedIn profiles from: `coresignal` (default) or `local` (headless browser).",
+        default=os.environ.get("PERSON_FINDER_SOURCE", "local"),
+        help="Where to fetch LinkedIn profiles from: `local` (default, headless browser) or `coresignal`.",
     )
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
 
@@ -338,7 +339,7 @@ async def main() -> None:
         logger.info("Loaded {} persons (start={}, end={})", len(persons), args.start, args.end)
 
     # ── resume: skip already-processed school_ids ─────────
-    if args.write_to_sheet:
+    if not args.no_write_to_sheet:
         if args.start is not None or args.end is not None:
             existing_ids: set[str] = set()
             logger.info("Sheet output: --start/--end set; resume from Results sheet disabled.")
