@@ -165,7 +165,7 @@ def fetch_profile_html(profile_url: str, wait: int = 10) -> str:
 def parse_full_linkedin_profile(html: str) -> tuple[FullLinkedinProfile, TokenUsage]:
     text = _strip_html(html)[:60000]
 
-    model_name = "gemini-2.0-flash"
+    model_name = "gemini-2.5-flash"
     prompt = f"""Convert this LinkedIn profile page into a clean, well-structured markdown document describing the person.
 Include all relevant information: name, headline, location, current and past work experience, education, skills, certifications, and any other notable details.
 Return ONLY the markdown text, no extra commentary.
@@ -200,7 +200,7 @@ def search_profiles(keywords: str) -> tuple[list[LinkedInProfile], TokenUsage]:
         logger.info(f"No LinkedIn search results found for: {keywords}")
         # Return empty list instead of raising exception - caller handles empty results gracefully
         empty_usage = TokenUsage(
-            model_name="gemini-2.0-flash",
+            model_name="gemini-2.5-flash",
             input_tokens=0,
             output_tokens=0,
             thinking_tokens=0,
@@ -214,7 +214,7 @@ def search_profiles(keywords: str) -> tuple[list[LinkedInProfile], TokenUsage]:
 
     text = _strip_html(html)[:60000]
 
-    model_name = "gemini-2.0-flash"
+    model_name = "gemini-2.5-flash"
     prompt = f"""Extract all people/profiles from this LinkedIn search results page.
 
 These profile URLs were found on the page — match each person to their URL:

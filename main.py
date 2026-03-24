@@ -302,6 +302,7 @@ async def main() -> None:
         default=os.environ.get("PERSON_FINDER_SOURCE", "local"),
         help="Where to fetch LinkedIn profiles from: `local` (default, headless browser) or `coresignal`.",
     )
+    parser.add_argument("--n", type=int, default=None, dest="n", help="Maximum number of persons to process in this run.")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
 
     args = parser.parse_args()
@@ -370,6 +371,10 @@ async def main() -> None:
             output_dest,
             len(persons),
         )
+
+    if args.n is not None:
+        persons = persons[:args.n]
+        logger.info("--n {}: processing up to {} person(s).", args.n, len(persons))
 
     logger.info("Writing results to: {}", output_dest)
 

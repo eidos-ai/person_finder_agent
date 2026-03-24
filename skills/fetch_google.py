@@ -153,7 +153,7 @@ def google_search(query: str, wait: int = 5) -> tuple[list[SearchResult], TokenU
 
     text = _strip_html(html)[:60000]
 
-    model_name = "gemini-2.0-flash"
+    model_name = "gemini-2.5-flash"
     prompt = f"""Extract all search results from this Google search results page.
 Return ONLY a JSON array where each element has:
 - page_url: the URL of the search result
