@@ -18,9 +18,19 @@ from selenium.webdriver.chrome.options import Options
 from loguru import logger
 from token_usage import TokenUsage, extract_token_usage
 
-CHROMIUM_BIN = "/Applications/Chromium.app/Contents/MacOS/Chromium"
 MASTER_PROFILE_DIR = os.path.expanduser("~/.chromium-profiles/linkedin")
 GCP_SA_PATH = "gcp-sa Manuel_Correa JS.json"
+
+
+def _default_chromium_bin() -> str:
+    if sys.platform == "darwin":
+        return "/Applications/Chromium.app/Contents/MacOS/Chromium"
+    if sys.platform == "win32":
+        return r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    return "chromium-browser"
+
+
+CHROMIUM_BIN = os.environ.get("CHROMIUM_BIN") or _default_chromium_bin()
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_SA_PATH
 
@@ -64,7 +74,8 @@ def _base_options(headless: bool = False) -> Options:
     opts.binary_location = CHROMIUM_BIN
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
-    opts.add_argument("--use-mock-keychain")
+    if sys.platform == "darwin":
+        opts.add_argument("--use-mock-keychain")
     opts.add_argument(f"--user-data-dir={MASTER_PROFILE_DIR}")
     if headless:
         opts.add_argument("--headless=new")
@@ -72,12 +83,14 @@ def _base_options(headless: bool = False) -> Options:
 
 
 def open_chromium_for_login():
-    subprocess.Popen([
+    cmd = [
         CHROMIUM_BIN,
         f"--user-data-dir={MASTER_PROFILE_DIR}",
-        "--use-mock-keychain",
         "https://www.linkedin.com/login",
-    ])
+    ]
+    if sys.platform == "darwin":
+        cmd.insert(2, "--use-mock-keychain")
+    subprocess.Popen(cmd)
     logger.info("Chromium opened — log in to LinkedIn, then close the browser.")
 
 

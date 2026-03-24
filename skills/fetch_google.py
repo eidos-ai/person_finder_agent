@@ -17,8 +17,18 @@ from selenium.webdriver.chrome.options import Options
 from loguru import logger
 from token_usage import TokenUsage, extract_token_usage
 
-CHROMIUM_BIN = "/Applications/Chromium.app/Contents/MacOS/Chromium"
 GCP_SA_PATH = "gcp-sa Manuel_Correa JS.json"
+
+
+def _default_chromium_bin() -> str:
+    if sys.platform == "darwin":
+        return "/Applications/Chromium.app/Contents/MacOS/Chromium"
+    if sys.platform == "win32":
+        return r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    return "chromium-browser"
+
+
+CHROMIUM_BIN = os.environ.get("CHROMIUM_BIN") or _default_chromium_bin()
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_SA_PATH
 
@@ -53,7 +63,8 @@ def _base_options(headless: bool = False) -> Options:
     opts.binary_location = CHROMIUM_BIN
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
-    opts.add_argument("--use-mock-keychain")
+    if sys.platform == "darwin":
+        opts.add_argument("--use-mock-keychain")
     if headless:
         opts.add_argument("--headless=new")
     return opts
