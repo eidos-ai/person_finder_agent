@@ -74,6 +74,9 @@ def _base_options(headless: bool = False) -> Options:
     opts.binary_location = CHROMIUM_BIN
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--remote-debugging-port=0")
+    opts.add_argument("--disable-extensions")
     if sys.platform == "darwin":
         opts.add_argument("--use-mock-keychain")
     opts.add_argument(f"--user-data-dir={MASTER_PROFILE_DIR}")
